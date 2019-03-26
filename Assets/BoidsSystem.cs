@@ -27,7 +27,7 @@ public class BoidsSystem : JobComponentSystem
     }
 
     NativeArray<UsedData> _inData;
-    NativeArray<UsedData> _outData;
+    NativeArray<float3> _outforce;
 
     protected override void OnCreateManager()
     {
@@ -64,7 +64,7 @@ public class BoidsSystem : JobComponentSystem
     }
 
     [BurstCompile]
-    private struct BoidMovementJob : IJobNativeMultiHashMapMergedSharedKeyIndices
+    private struct BoidSteeringJob : IJobNativeMultiHashMapMergedSharedKeyIndices
     {
 
         public Unity.Mathematics.Random random;
@@ -72,7 +72,7 @@ public class BoidsSystem : JobComponentSystem
         [ReadOnly] public float DeltaTime;
 
         [ReadOnly] public NativeArray<UsedData> inData;
-        [WriteOnly] public NativeArray<UsedData> outData;
+        [WriteOnly] public NativeArray<float3> outforce;
 
         public void ComputeMovement(int index)
         {
@@ -81,8 +81,6 @@ public class BoidsSystem : JobComponentSystem
 
             float3 forward  = math.mul(rotation, new float3(0.0f, 0.0f, 1.0f));
             float3 up       = math.mul(rotation, new float3(0.0f, 1.0f, 0.0f));
-
-            float speed = 30.0f * DeltaTime;
 
             // follow
             float3 avgHeading = float3.zero;
@@ -104,7 +102,7 @@ public class BoidsSystem : JobComponentSystem
                     float3 other_forward  = math.mul(other_rotation, new float3(0.0f, 0.0f, 1.0f));
                     float3 other_up       = math.mul(other_rotation, new float3(0.0f, 1.0f, 0.0f));
                     
-                    avgHeading      += math.mul(other_rotation, new float3(0.0f, 0.0f, 1.0f));
+                    avgHeading      += other_forward;
                     towardsForce    += other_position;
                     outwardsForce   += other_position - position;
 
@@ -119,30 +117,28 @@ public class BoidsSystem : JobComponentSystem
                 outwardsForce   = math.normalize(outwardsForce / inRangeCount * -1.0f); 
             }
 
-            up = math.mul(
+            forward = math.mul(
                 quaternion.Euler(
-                    random.NextFloat(-speed, speed),
-                    random.NextFloat(-speed, speed),
-                    random.NextFloat(-speed, speed)
+                    random.NextFloat(-10.0f, 10.0f),
+                    random.NextFloat(-10.0f, 10.0f),
+                    random.NextFloat(-10.0f, 10.0f)
                 ),
-                up
+                forward
             );
 
             float3 force = (
-                (up * 0.3f) + 
+                (forward * 0.25f) + 
                 (avgHeading * 0.4f) + 
-                (towardsForce * 0.1f) + 
-                (outwardsForce * 0.2f) + 
-                (-position / 1000.0f)
-            ) * speed;
+                (towardsForce * 0.2f) + 
+                (outwardsForce * 0.15f)
+            );
 
-            rotation = quaternion.LookRotation(forward, force);
-
-            outData[index] = new UsedData()
+            if (math.distance(float3.zero, position) > 1000.0f)
             {
-                pos = position + force,
-                rot = rotation.value
-            };
+                force += math.normalize(-position);
+            }
+
+            outforce[index] = math.normalize(force);
         } 
 
         public void ExecuteFirst(int index)
@@ -159,12 +155,30 @@ public class BoidsSystem : JobComponentSystem
     [BurstCompile]
     struct ApplyValues : IJobProcessComponentDataWithEntity<Position, Rotation>
     {
-        [ReadOnly] public NativeArray<UsedData> outData;
+        [ReadOnly] public float DeltaTime;
+        [ReadOnly] public NativeArray<float3> outforce;
 
         public void Execute(Entity entity, int index, ref Position position, ref Rotation rotation)
         {
-            position.Value = outData[index].pos;
-            rotation.Value = new quaternion(outData[index].rot.x, outData[index].rot.y, outData[index].rot.z, outData[index].rot.w);
+            float3 up  = math.mul(rotation.Value, new float3(0.0f, 1.0f, 0.0f));
+            float speed = 5.0f * DeltaTime;
+
+            position.Value += outforce[index] * speed;
+            rotation.Value = quaternion.LookRotation(outforce[index], up);
+        }
+    }
+
+    [BurstCompile]
+    struct MoveForward : IJobProcessComponentDataWithEntity<Position, Rotation>
+    {
+        [ReadOnly] public float DeltaTime;
+
+        public void Execute(Entity entity, int index, ref Position position, ref Rotation rotation)
+        {
+            float3 forward  = math.mul(rotation.Value, new float3(0.0f, 0.0f, 1.0f));
+            float speed = 5.0f * DeltaTime;
+
+            position.Value += forward * speed;
         }
     }
 
@@ -180,47 +194,83 @@ public class BoidsSystem : JobComponentSystem
         }
 
         _inData  = new NativeArray<UsedData>(boidCount, Allocator.Persistent, NativeArrayOptions.UninitializedMemory);
-        _outData = new NativeArray<UsedData>(boidCount, Allocator.Persistent, NativeArrayOptions.UninitializedMemory);
+        _outforce = new NativeArray<float3>(boidCount, Allocator.Persistent, NativeArrayOptions.UninitializedMemory);
     }
+
+    float lastSteeringStart = -1.0f;
+    BoidSteeringJob steeringJob;
+    JobHandle steeringJobHandle;
 
     protected override JobHandle OnUpdate(JobHandle inputDeps)
     {
         int boidCount = _BoidGroup.CalculateLength();
 
-        var copyDataJob = new CopyDataJob()
+        if (lastSteeringStart <= 0.0f)
         {
-            inData = _inData
-        };
-        var copyDataJobHandle = copyDataJob.ScheduleGroup(_BoidGroup, inputDeps);
+            var copyDataJob = new CopyDataJob()
+            {
+                inData = _inData
+            };
+            var copyDataJobHandle = copyDataJob.ScheduleGroup(_BoidGroup, inputDeps);
 
-        _hashMap.Clear();
-        var hashPositionJob = new HashPositionJob()
+            _hashMap.Clear();
+            var hashPositionJob = new HashPositionJob()
+            {
+                hashMap = _hashMap.ToConcurrent()
+            };
+            var hashPositionJobHandle = hashPositionJob.ScheduleGroup(_BoidGroup, inputDeps);
+
+            JobHandle initJobHandle = JobHandle.CombineDependencies(copyDataJobHandle, hashPositionJobHandle);
+
+            steeringJob = new BoidSteeringJob()
+            {
+                random = new Unity.Mathematics.Random(_random.NextUInt()),
+                DeltaTime = Time.deltaTime,
+                BoidCount = boidCount,
+                inData = _inData,
+                outforce = _outforce
+
+            };
+
+            steeringJobHandle = steeringJob.Schedule(_hashMap, 64, initJobHandle);
+            lastSteeringStart = Time.realtimeSinceStartup;
+
+            MoveForward moveJob = new MoveForward()
+            {
+                DeltaTime = Time.deltaTime
+            };
+            JobHandle moveJobHandle = moveJob.ScheduleGroup(_BoidGroup, initJobHandle);
+
+            _BoidGroup.AddDependency(moveJobHandle);
+            return moveJobHandle;
+        }
+        else if (Time.realtimeSinceStartup - lastSteeringStart > 0.5f)
         {
-            hashMap = _hashMap.ToConcurrent()
-        };
-        var hashPositionJobHandle = hashPositionJob.ScheduleGroup(_BoidGroup, inputDeps);
+            JobHandle initJobHandle = JobHandle.CombineDependencies(inputDeps, steeringJobHandle);
 
-        var initJobHandle = JobHandle.CombineDependencies(copyDataJobHandle, hashPositionJobHandle);
+            ApplyValues applyValues = new ApplyValues()
+            {
+                DeltaTime = Time.deltaTime,
+                outforce = _outforce
+            };
+            JobHandle applyValuesJobHandle = applyValues.ScheduleGroup(_BoidGroup, initJobHandle);
 
-        var movementJob = new BoidMovementJob()
+            lastSteeringStart = -1.0f;
+
+            _BoidGroup.AddDependency(applyValuesJobHandle);
+            return applyValuesJobHandle;
+        }
+        else
         {
-            random = new Unity.Mathematics.Random(_random.NextUInt()),
-            DeltaTime = Time.deltaTime,
-            BoidCount = boidCount,
-            inData = _inData,
-            outData = _outData
+            MoveForward moveJob = new MoveForward()
+            {
+                DeltaTime = Time.deltaTime,
+            };
+            JobHandle moveJobHandle = moveJob.ScheduleGroup(_BoidGroup, inputDeps);
 
-        };
-        JobHandle movementJobHandle = movementJob.Schedule(_hashMap, 64, initJobHandle);
-
-        var applyJob = new ApplyValues()
-        {
-            outData = _outData
-        };
-        var applyJobHandle = applyJob.ScheduleGroup(_BoidGroup, movementJobHandle);
-
-        _BoidGroup.AddDependency(applyJobHandle);
-        return applyJobHandle;
+            _BoidGroup.AddDependency(moveJobHandle);
+            return moveJobHandle;
+        }
     }
 
     protected override void OnStopRunning()
@@ -228,6 +278,6 @@ public class BoidsSystem : JobComponentSystem
         _hashMap.Dispose();
 
         _inData.Dispose();
-        _outData.Dispose();
+        _outforce.Dispose();
     }
 }

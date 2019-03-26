@@ -33,7 +33,11 @@ public class Bootstrap : MonoBehaviour
             });
 
             entityManager.SetComponentData(boid, new Position{
-                Value = new float3(random.NextFloat(-100.0f, 100.0f), random.NextFloat(-100.0f, 100.0f), random.NextFloat(-100.0f, 100.0f))
+                Value = new float3(
+                    random.NextFloat(-200.0f, 200.0f), 
+                    random.NextFloat(-200.0f, 200.0f), 
+                    random.NextFloat(-200.0f, 200.0f)
+                )
             });
 
             entityManager.SetComponentData(boid, new Rotation{

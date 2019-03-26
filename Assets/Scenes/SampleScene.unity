@@ -471,10 +471,10 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 861322178a620356dad9a061927f8c31, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  mesh: {fileID: 10208, guid: 0000000000000000e000000000000000, type: 0}
+  mesh: {fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}
   material: {fileID: 2100000, guid: 36527188b273bd20cba3c3d310b1a595, type: 2}
   maxSpeed: 5
-  boidCount: 2000
+  boidCount: 1000
 --- !u!4 &693998767
 Transform:
   m_ObjectHideFlags: 0
